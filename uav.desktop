@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Encoding=UTF-8
+Name=UAV
+Exec=projects/Predator/run.sh
+Icon=projects/Predator/icon.png
+Terminal=true
+Type=Application
+StartupNotify=true
+Categories=GNOME;GTK;Utility;

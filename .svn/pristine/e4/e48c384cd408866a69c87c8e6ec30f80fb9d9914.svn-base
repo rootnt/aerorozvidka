@@ -1,0 +1,443 @@
+#! /usr/bin/python
+# -*- coding: utf-8 -*-
+
+import os, time, datetime
+from gi.repository import Gtk, GObject, Gdk
+from threading import Thread
+
+from enum import Enum
+
+CURRENT_DIRECTORY = os.path.dirname(__file__)
+
+class SBState(Enum):
+    Init, Detecting, Paused, Completed = range(4)
+
+
+UI_MAIN_MENUS = """
+<ui>
+    <menubar name='MenuBar'>
+        <menu action='FileMenu'>
+            <menuitem action='FileProcess' />
+            <separator />
+            <menuitem action='FileQuit' />
+            <separator />
+        </menu>
+        <menu action='ViewMenu'>
+            <menuitem action='ShowHideSelected' />
+            <separator />
+            <menuitem action='FilterMenu'/>
+            <separator />
+            <menu action='SortMenu'>
+                <menuitem action='SortByTime' />
+                <menuitem action='SortByObjects' />
+                <menuitem action='SortByAvgProbability' />
+                <separator />
+                <menuitem action='SortRadioAscending' />
+                <menuitem action='SortRadioDescending' />
+            </menu>
+            <separator />
+            <menuitem action='ProcessingMenu'/>
+            <separator />
+            <menuitem action='AdvancedSettingsMenu'/>
+            <separator />
+        </menu>
+    </menubar>
+    <!--<menubar name='ViewMenuBar'>
+        <menuitem action='FilterMenu'/>
+        <menu action='SortMenu'>
+            <menuitem action='SortByTime' />
+            <menuitem action='SortByObjects' />
+            <menuitem action='SortByAvgProbability' />
+            <separator />
+            <menuitem action='SortRadioAscending' />
+            <menuitem action='SortRadioDescending' />
+        </menu>
+        <separator />
+        <menuitem action='AdvancedSettings'/>
+    </menubar>-->
+    <popup name='PopupMenu'>
+        <menuitem action='ContextOpenImage' />
+        <menuitem action='ContextOpenFolder' />
+        <separator />
+        <menuitem action='ContextOpenVideo' />
+        <separator />
+        <menuitem action='ContextSave' />
+        <separator />
+    </popup>
+</ui>
+"""
+
+open_file_dialog_filters = {
+    "video": ["*.avi", "*.mkv", "*.MOV", "*.mp4", "*.mpg", "*.flv", "*.mpeg", "*.MP4"],
+    "telemetry": ["*.kmm", "*.*"],
+    "tracking": ["*.dtt", ]
+}
+
+sorting_callbacks = {
+    "ascending": {
+        "before": -1,
+        "after": 1
+    },
+    "descending": {
+        "before": 1,
+        "after": -1
+    }
+}
+colors = dict(
+    red=Gdk.RGBA(1, 0, 0, 1).to_color(),
+    yellow=Gdk.RGBA(0.95, 1, 0, 1).to_color(),
+    blue=Gdk.RGBA(0, 0, 1, 1).to_color(),
+    green=Gdk.RGBA(0, 1, 0, 1).to_color(),
+    aloe=Gdk.RGBA(0, 1, 0.2, 1).to_color(),
+    gray=Gdk.RGBA(0.2, 0.2, 0.2, 1).to_color(),
+    light_gray=Gdk.RGBA(0.7, 0.7, 0.7, 1).to_color(),
+    white=Gdk.RGBA(1, 1, 1, 1).to_color(),
+    black=Gdk.RGBA(1, 1, 1, 1).to_color(),
+    purple=Gdk.RGBA(1, 0, 0.75, 1).to_color(),
+    orange=Gdk.RGBA(1, 0.5, 0, 1).to_color())
+
+
+
+def is_int(s):
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+
+
+def is_float(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def seconds_to_hms_str(second):
+    m, s = divmod(second, 60)
+    h, m = divmod(m, 60)
+    return "%02d:%02d:%02d" % (h, m, s)
+
+
+def time_to_seconds(time_string):
+        try:
+            x1 = time.strptime(time_string, '%H:%M:%S')
+            return datetime.timedelta(hours=x1.tm_hour, minutes=x1.tm_min, seconds=x1.tm_sec).total_seconds()
+        except ValueError, e:
+            return None
+
+
+def create_main_ui_manager(main_window):
+
+    uimanager = Gtk.UIManager()
+
+    # Throws exception if something went wrong
+    uimanager.add_ui_from_string(UI_MAIN_MENUS)
+
+    # Add the accelerator group to the toplevel window
+    accelgroup = uimanager.get_accel_group()
+    main_window.add_accel_group(accelgroup)
+    return uimanager
+
+
+class WarningDialog(Gtk.Dialog):
+
+    def __init__(self, parent, message):
+        Gtk.Dialog.__init__(self, u"Увага", parent, 0,
+                            (u"Відміна", Gtk.ResponseType.CANCEL,
+                             u"Гаразд", Gtk.ResponseType.OK)
+                            )
+            # (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            #  Gtk.STOCK_OK, Gtk.ResponseType.OK))
+
+        self.set_default_size(200, 150)
+        self.set_border_width(10)
+
+        label = Gtk.Label(message)
+        #u""" Для роботи з наступним відео слід \nзавершити роботу з теперішнім. \n Бажаєте закрити відео?"""
+
+        box = self.get_content_area()
+        box.add(label)
+        self.show_all()
+
+
+class MenuBarWidgets:
+
+    def __init__(self):
+        pass
+
+
+class StatusWindowWidgets:
+
+    def __init__(self, main):
+
+        builder = Gtk.Builder()
+        builder.add_from_file(os.path.join(CURRENT_DIRECTORY, "status_box.glade"))
+
+        self.vlc_widget = main
+        self._visible = False
+        self.main_window = builder.get_object("window1")
+        self.main_window.set_modal(True)
+        self.main_window.set_title(u"Статус обробки")
+        self.main_box = builder.get_object("box4")
+        #self.main_box.set_size_request(200, -1)
+
+        self.label_status_message = builder.get_object("label2")
+        self.progressbar = builder.get_object("progressbar1")
+        self.progressbar.set_pulse_step(0.05)
+        self.gp = None
+
+        self.label_percents_completed = builder.get_object("label6")
+        self.label_time_to_end = builder.get_object("label5")
+        self.gtte = None
+
+        self.button_stop = builder.get_object("button1")
+        self.button_current_state = SBState.Init
+
+        # self.thread_progress = Thread(target=self.set_gp_updater)
+        # self.thread_progress.daemon = True
+        # self.thread_progress.start()
+        #
+        # self.thread_timer = Thread(target=self.set_tte_updater)
+        # self.thread_timer.daemon = True
+        # self.thread_timer.start()
+        self.set_gp_updater()
+        self.set_tte_updater()
+
+        self.button_stop.connect("clicked", self.button_callback_manage)
+        self.main_window.connect("delete_event", lambda w, b: self.show_status(False))  # self.delete_event)
+        self.main_window.connect("destroy", lambda b: self.show_status(False))
+        self.main_box.show_all()
+
+    def button_callback_manage(self, b):
+        print b
+        print self.button_current_state
+        if self.button_current_state == SBState.Init:
+
+            self.vlc_widget.validate_and_process()
+            self.button_current_state = SBState.Detecting
+            #check
+
+        elif self.button_current_state == SBState.Detecting:
+
+            self.send_pause_request(b)
+
+        elif self.button_current_state == SBState.Paused:
+
+            self.vlc_widget.resume_detecting()
+            self.button_current_state = SBState.Detecting
+
+        elif self.button_current_state == SBState.Completed:
+            pass
+        else:
+            pass
+
+            #     #change state from main class
+            # if self.vlc_widget.detection_paused:
+            #     self.button_current_state = SBState.Pause
+            # self.button_current_state = SBState.Resume
+            # pass
+
+    def on_video_upload(self):
+        print("\n%s\n" % str("status - on video upload"))
+        self.label_status_message.set_text(u"Не розпочато...")
+        self.button_stop.set_label(u"Обробити")
+        self.label_percents_completed.set_text("0%")
+        self.button_stop.show()
+
+    def on_detetection_start(self):
+        print("\n%s\n" % str("status - on detection start"))
+        self.label_status_message.set_text(u"Обробка відео...")
+        self.button_stop.set_label(u"Призупинити")
+        self.button_current_state = SBState.Detecting
+        self.button_stop.show()
+        self.show_status(True)
+
+    def on_detection_pause(self):
+        print("\n%s\n" % str("status - on detection pause"))
+        self.button_current_state = SBState.Paused
+        self.label_status_message.set_text(u"Призупинено...")
+        self.button_stop.set_label(u"Відновити")
+        self.button_stop.show()
+
+    def on_detection_completed(self):
+        print("\n%s\n" % str("status - on detection completed"))
+        #self.label_status_message.set_text(u"Yippee ki-yay, motherfucker!")
+        self.label_status_message.set_text(u"Обробку завершено.")
+        self.button_stop.set_label(u"Завершено")
+        self.label_time_to_end.set_text("00:00:00")
+        self.button_stop.hide()
+        self.show_status(False)
+
+    def send_pause_request(self, b):
+        print("\n You've pressed PAUSE button!\n")
+        self.label_status_message.set_text(u"Очікуйте...")
+        self.vlc_widget.detection_pause_request = True
+        b.hide()
+        #self.button_stop.hide()
+        #b.hide()
+
+    def set_gp_updater(self):
+
+        self.gp = GObject.timeout_add(100, self.update_progress)
+
+    def set_tte_updater(self):
+
+        self.gtte = GObject.timeout_add(1000, self.update_tte)
+
+    def update_progress(self):
+
+        if self.vlc_widget.detection_progress is not None:
+            if is_float(self.vlc_widget.detection_progress) and 100 >= self.vlc_widget.detection_progress >= 0:
+                self.progressbar.set_fraction(self.vlc_widget.detection_progress/100.)
+                self.label_percents_completed.set_text(str(int(self.vlc_widget.detection_progress))+"%")
+                return True
+
+        self.progressbar.pulse()
+        return True
+
+    def update_tte(self):
+
+        if self.vlc_widget.detection_time_to_end is not None and \
+                self.vlc_widget.detection_time_to_end > 0 and \
+                not self.vlc_widget.detection_paused:
+            self.vlc_widget.detection_time_to_end -= 1
+            self.label_time_to_end.set_text(seconds_to_hms_str(self.vlc_widget.detection_time_to_end))
+            #return True
+
+        #self.label_time_to_end.set_text("00:00:00")
+        return True
+
+    def delete_event(self, widget, event, data=None):
+        self.main_window.hide()
+        self._visible = False
+        return True
+
+    def show_status(self, toggle=None):
+
+        if toggle is None:
+            if self._visible:
+                self.main_window.hide()
+            else:
+                self.main_window.show()
+            self._visible = not self._visible
+        else:
+            if toggle:
+                self.main_window.show()
+                self._visible = True
+            else:
+                self.main_window.hide()
+                self._visible = False
+        return True
+
+
+class FilterWindowWidgets:
+
+    def __init__(self):
+
+        builder = Gtk.Builder()
+        builder.add_from_file(os.path.join(CURRENT_DIRECTORY, "filter_window.glade"))
+
+        self._visible = False
+        self.main_window = builder.get_object("filterWindow")
+        self.main_window.set_modal(True)
+        self.main_window.set_title(u"Фільтрування")
+
+        self.entry_time_min = builder.get_object("entry1")
+        self.entry_time_max = builder.get_object("entry3")
+        self.entry_obj_min = builder.get_object("entry2")
+        self.entry_obj_max = builder.get_object("entry4")
+
+        self.button_filters_clear = builder.get_object("button3")
+        self.button_filter = builder.get_object("button4")
+
+        self.main_window.connect("delete_event", self.delete_event)
+        self.main_window.connect("destroy", lambda b: self.show_filters())
+
+    def delete_event(self, widget, event, data=None):
+        self.main_window.hide()
+        self._visible = False
+        return True
+
+    def show_filters(self):
+
+        if self._visible:
+            self.main_window.hide()
+        else:
+            self.main_window.show_all()
+        self._visible = not self._visible
+
+
+class SettingsWindowWidgets:
+
+    def __init__(self):  # , builder):
+        # Gtk.Window.__init__()           sw.__init__(self)
+
+        builder = Gtk.Builder()
+        builder.add_from_file(os.path.join(CURRENT_DIRECTORY, "settings_window.glade"))
+
+        self.main_window = builder.get_object("settingsWindow")
+        self.main_window.set_position(Gtk.WindowPosition.CENTER)
+        self.main_window.connect("delete_event", lambda w, b: self.hide_settings())
+        self.main_window.set_modal(True)
+        self.window_visible = False
+
+        self.entry_video = builder.get_object("entry_video")
+        self.entry_video.set_editable(False)
+        # self.entry_telemetry = builder.get_object("entry_tele")
+        # self.entry_telemetry.set_editable(False)
+        self.entry_results_dir = builder.get_object("entry_res")
+        self.entry_results_dir.set_editable(False)
+        self.button_video = builder.get_object("button_video")
+        # self.button_telemetry = builder.get_object("button_tele")
+        self.button_results = builder.get_object("button_res")
+        self.button_cancel = builder.get_object("buttonCancel")
+        self.button_process = builder.get_object("button_process")
+        self.radio_order_chrono = builder.get_object("radiobutton1")
+        self.radio_order_reverse = builder.get_object("radiobutton2")
+        self.entry_probability = builder.get_object("entry_prob")
+
+        #self.entry_probability2 = builder.get_object("spinbutton1")
+
+
+        self.entry_processing_start = builder.get_object("entry4")
+        self.entry_processing_end = builder.get_object("entry5")
+        # self.entry_video_start = builder.get_object("entry6")
+        # self.entry_telemetry_start = builder.get_object("entry7")
+        self.main_window.connect("destroy", lambda b: self.hide_settings())
+
+    def on_video_open(self, video_path, video_duration):
+
+        self.entry_video.set_text(video_path)
+        self.entry_processing_start.set_text(seconds_to_hms_str(0))
+        self.entry_processing_end.set_text(seconds_to_hms_str(video_duration-1))
+        self.entry_processing_start.set_editable(True)
+        self.entry_processing_end.set_editable(True)
+
+    def on_video_close(self):
+
+        self.entry_video.set_text("")
+        #self.entry_telemetry.set_text("")
+        self.entry_results_dir.set_text("")
+        self.entry_processing_end.set_text("")
+        self.entry_processing_start.set_text("")
+        self.entry_processing_start.set_editable(False)
+        self.entry_processing_end.set_editable(False)
+        #self.hide_settings()
+
+    def delete_event(self, widget, event, data=None):
+        self.main_window.hide()
+        self.window_visible = False
+        return True
+
+    def show_settings(self):
+        if not self.window_visible:
+            self.main_window.show_all()
+            self.window_visible = True
+
+    def hide_settings(self):
+        if self.window_visible:
+            self.main_window.hide()
+            self.window_visible = False
+        return True
